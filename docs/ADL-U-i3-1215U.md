@@ -14,8 +14,10 @@ Status: untested on hardware. This is a first-boot checklist, not a guarantee.
 
 | Key | Type | Value |
 |-----|------|-------|
-| `AAPL,ig-platform-id` | Data | `499A0000` |
-| `device-id` | Data | `499A0000` |
+| `AAPL,ig-platform-id` | Data | `0000499A` (base64 `AABJmg==`, platform 0x9A490000) |
+| `device-id` | Data | `499A0000` (base64 `SZoAAA==`, device 0x9A49) |
+
+The two values are byte-reversed on purpose: do not copy one into the other.
 
 Optional: `edid` (Data) to inject your panel EDID.
 
