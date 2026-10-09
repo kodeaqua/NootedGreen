@@ -329,7 +329,16 @@ bool NGreen::wrapIGAccelDeviceStart(void *that) {
 
 void NGreen::setRMMIOIfNecessary() {
 	if (UNLIKELY(!this->rmmio || !this->rmmio->getLength())) {
+		if (!this->iGPU) {
+			SYSLOG("ngreen", "setRMMIOIfNecessary: no iGPU device, MMIO unavailable");
+			return;
+		}
 		this->rmmio = this->iGPU->mapDeviceMemoryWithRegister(kIOPCIConfigBaseAddress0);
+		if (!this->rmmio) {
+			SYSLOG("ngreen", "setRMMIOIfNecessary: failed to map BAR0");
+			this->rmmioPtr = nullptr;
+			return;
+		}
 		this->rmmioPtr = reinterpret_cast<volatile uint32_t *>(this->rmmio->getVirtualAddress());
 	}
 }
