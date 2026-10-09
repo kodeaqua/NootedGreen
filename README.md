@@ -163,6 +163,7 @@ Where:
 | `-ngreenicl` | Load the legacy ICL framebuffer + HW kexts instead of TGL. For older Gen11 hardware where TGL spoof isn't suitable. |
 | `-disablegfxfirmware` | Disable GuC/HuC firmware loading — required on RPL/ADL because scheduler selection (`ngreenSched`) happens after the HW-branch `processKext`, so the driver attempts firmware init before NootedGreen can override the scheduler type. Not needed on real TGL (GuC loads natively). |
 | `-ngwegcoex` / `ngwegcoex=1` | Enable WEG coexistence mode. |
+| `ngreen-dss=N` | Override the dual sub-slice (DSS) count used for GPU topology (1–6). Default is read from the `GEN12_GT_GEOMETRY_DSS_ENABLE` fuse (0x913C), falling back to 6 (96 EU). Each DSS = 2 sub-slices × 8 EU, so `ngreen-dss=4` gives the 64 EU of an i3-1215U. |
 | `ngreenSched=N` | Select GPU scheduler type: `3` = GuC firmware, `4` = IGScheduler4, `5` = host preemptive (default: `3` on real TGL, `5` on RPL/ADL) |
 | `ngreen-dmc=skip|tgl|adlp` | DMC policy: skip CSR load, or force TGL/ADL-P DMC path for diagnostics. |
 | `-allow3d` | Force 3D acceleration |
@@ -372,7 +373,7 @@ NootedGreen (Gen11/Gen12 — TGL driver spoofing):
 |----------|--------|------|-------|
 | **Tiger Lake** | ~90% | V52 | RPL-specific patches auto-skipped via CPUID. GuC, topology, ForceWake, BCS all use native Apple paths. Remaining risk: SKU bypass hook + DYLD patches still in the path. No real TGL hardware tested yet. |
 | **Raptor Lake-P** | ~70% | V80L | Primary dev platform (i7-13700H). System boots to login on macOS 14.7.1 (`23H222`). GPU reset storm tamed: V153/V154 circuit-breaker confirmed working. `userspace watchdog timeout` KP root cause identified and fixed: V80L plane-linearization in `v71EmrEnforcer` was fighting WindowServer over plane registers every 50ms — now limited to first 3 ticks. Brief display flash at boot preserved. Active work: V158 execlist/CSB drain. |
-| **Alder Lake** | ~35% | — | Same Gen12 arch as RPL, should behave similarly. Untested. |
+| **Alder Lake** | ~35% | — | Same Gen12 arch as RPL, should behave similarly. Topology is now fuse-derived (`ngreen-dss`), so 4-DSS/64 EU parts such as the i3-1215U (`0x46B3`, spoofed to `0x9A49`) are supported on paper. Untested on hardware. |
 | **Rocket Lake** | ~25% | — | Gen12 LP but different display engine. Untested. |
 | **Ice Lake** | ~50% | V52 | Dedicated ICL path exists (ICL FB + ICL HW kextInfos, ICL-specific object offsets in `getGPUInfoICL`, SKU gate×3, platform remap, PAVP hook, DYLD ICL Metal device-ID bypass). Topology hardcoded to ICL GT2 LP (1×8×8=64EU). IRQ init disabled (V37 boot hang). ICL path only activates when TGL kexts are absent. Untested on real ICL hardware. |
 

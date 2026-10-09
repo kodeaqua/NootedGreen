@@ -315,9 +315,18 @@ static const NGreenTopology &resolveTopology() {
 	} else if (NGreen::callback) {
 		// readReg32() returns 0 when MMIO is not mapped, which falls through to the default.
 		NGreen::callback->setRMMIOIfNecessary();
+		// Fuse registers sit in the render power domain; wake it so reads are not 0/0xFFFFFFFF.
+		NGreen::callback->writeReg32(FORCEWAKE_RENDER_GEN9, (1 << 16) | 1);
+		bool fwAcked = false;
+		for (int i = 0; i < FORCEWAKE_ACK_TIMEOUT_MS * 10; i++) {
+			if (NGreen::callback->readReg32(FORCEWAKE_ACK_RENDER_GEN9) & 1) { fwAcked = true; break; }
+			IODelay(100);
+		}
 		const uint32_t dssMask = NGreen::callback->readReg32(NGREEN_GEN12_GT_GEOMETRY_DSS_ENABLE);
 		const uint32_t euDis   = NGreen::callback->readReg32(NGREEN_GEN11_EU_DISABLE);
 		const uint32_t sliceEn = NGreen::callback->readReg32(NGREEN_GEN11_GT_SLICE_ENABLE);
+		NGreen::callback->writeReg32(FORCEWAKE_RENDER_GEN9, (1 << 16) | 0);
+		if (!fwAcked) SYSLOG("ngreen", "topology: render forcewake ack timed out, fuse reads may be invalid");
 		SYSLOG("ngreen", "topology fuses: DSS_ENABLE=0x%x EU_DISABLE=0x%x SLICE_ENABLE=0x%x",
 			   dssMask, euDis, sliceEn);
 		// Reject unpowered/garbage reads (all-ones, zero, or bits beyond 6 DSS).
