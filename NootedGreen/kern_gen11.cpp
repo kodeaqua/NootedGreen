@@ -278,6 +278,67 @@ static int getV77KillDelayIterations() {
 	return 60;
 }
 
+// Gen12 (TGL/ADL/RPL) GPU topology, as seen by the TGL accelerator binary.
+// The binary counts traditional sub-slices (SS); Xe-LP hardware reports dual
+// sub-slices (DSS), each of which is two SS. Fuse layout follows Linux i915
+// gen12_sseu_info_init(): GEN12_GT_GEOMETRY_DSS_ENABLE is a per-DSS bitmask.
+#define NGREEN_GEN11_EU_DISABLE            0x9134
+#define NGREEN_GEN11_GT_SLICE_ENABLE       0x9138
+#define NGREEN_GEN12_GT_GEOMETRY_DSS_ENABLE 0x913C
+#define NGREEN_GEN12_MAX_DSS               6
+#define NGREEN_GEN12_EU_PER_SS             8
+
+struct NGreenTopology {
+	uint32_t numSlices;
+	uint32_t dss;
+	uint32_t numSubSlices;
+	uint32_t maxEUPerSubSlice;
+	uint32_t totalEU;
+	bool     resolved;
+};
+
+static NGreenTopology gTopology {};
+
+// Resolve the topology once. Priority: `ngreen-dss=N` boot-arg, then the DSS
+// fuse register, then the full 6-DSS (96 EU) configuration.
+static const NGreenTopology &resolveTopology() {
+	if (gTopology.resolved) return gTopology;
+
+	uint32_t dss = 0;
+	const char *source = "default";
+
+	uint32_t bootDss = 0;
+	if (PE_parse_boot_argn("ngreen-dss", &bootDss, sizeof(bootDss)) &&
+		bootDss >= 1 && bootDss <= NGREEN_GEN12_MAX_DSS) {
+		dss = bootDss;
+		source = "boot-arg";
+	} else if (NGreen::callback) {
+		// readReg32() returns 0 when MMIO is not mapped, which falls through to the default.
+		NGreen::callback->setRMMIOIfNecessary();
+		const uint32_t dssMask = NGreen::callback->readReg32(NGREEN_GEN12_GT_GEOMETRY_DSS_ENABLE);
+		const uint32_t euDis   = NGreen::callback->readReg32(NGREEN_GEN11_EU_DISABLE);
+		const uint32_t sliceEn = NGreen::callback->readReg32(NGREEN_GEN11_GT_SLICE_ENABLE);
+		SYSLOG("ngreen", "topology fuses: DSS_ENABLE=0x%x EU_DISABLE=0x%x SLICE_ENABLE=0x%x",
+			   dssMask, euDis, sliceEn);
+		// Reject unpowered/garbage reads (all-ones, zero, or bits beyond 6 DSS).
+		if (dssMask != 0 && (dssMask & ~((1u << NGREEN_GEN12_MAX_DSS) - 1)) == 0) {
+			dss = __builtin_popcount(dssMask);
+			source = "fuse";
+		}
+	}
+	if (dss == 0) dss = NGREEN_GEN12_MAX_DSS;
+
+	gTopology.numSlices        = 1;
+	gTopology.dss              = dss;
+	gTopology.numSubSlices     = dss * 2;
+	gTopology.maxEUPerSubSlice = NGREEN_GEN12_EU_PER_SS;
+	gTopology.totalEU          = gTopology.numSubSlices * gTopology.maxEUPerSubSlice;
+	gTopology.resolved         = true;
+	SYSLOG("ngreen", "topology (%s): dss=%u subslices=%u maxEU/SS=%u totalEU=%u",
+		   source, gTopology.dss, gTopology.numSubSlices, gTopology.maxEUPerSubSlice, gTopology.totalEU);
+	return gTopology;
+}
+
 bool Gen11::processKext(KernelPatcher &patcher, size_t index, mach_vm_address_t address, size_t size) {
 	if (kextG11FB.loadIndex == index) {
 		if (this->tglFBLoaded) {
@@ -1244,12 +1305,12 @@ bool Gen11::processKext(KernelPatcher &patcher, size_t index, mach_vm_address_t 
 		// NumSubSlices override (verified @ 0x28654 in LE binary)
 		// Original: mov ebx,[rbp-0x30]; popcnt esi,ebx; add esi,esi; mov [r15+0x1158],esi
 		//           → NumSubSlices = popcount(subsliceMask) * 2  (hardware-detected)
-		// Patch:    hardcodes NumSubSlices=12 for RPL 96EU (6 DSS × 2 SS/DSS = 12 SS).
+		// Patch:    writes NumSubSlices = 2 x DSS (r3bbb[4] is filled at patch time from resolveTopology(); 12 for 6-DSS/96EU parts).
 		//           Linux i915: subslice total=6 mask=0x3f, so 6 DSS doubled to 12 SS.
 		static const uint8_t f3bbb[] = {//NumSubSlices
 			0x8b, 0x5d, 0xd0, 0xf3, 0x0f, 0xb8, 0xf3, 0x01, 0xf6, 0x41, 0x89, 0xb7, 0x58, 0x11, 0x00, 0x00
 		};
-		static const uint8_t r3bbb[] = {
+		static uint8_t r3bbb[] = {
 			0x8b, 0x5d, 0xd0, 0xbe, 0x0c, 0x00, 0x00, 0x00, 0x90, 0x41, 0x89, 0xb7, 0x58, 0x11, 0x00, 0x00
 		};
 		
@@ -1405,10 +1466,11 @@ bool Gen11::processKext(KernelPatcher &patcher, size_t index, mach_vm_address_t 
 			
 			if (!NGreen::callback->isRealTGL) {
 				// RPL-only: hardcode topology and bypass BCS readiness check
+				r3bbb[4] = static_cast<uint8_t>(resolveTopology().numSubSlices); // mov esi, imm32 (low byte)
 				LookupPatchPlus const patchesRPL[] = {
 					{activeKext, f3b, r3b, arrsize(f3b),	1},      // L3BankCount=8
 					{activeKext, f3bb, r3bb, arrsize(f3bb),	1},    // MaxEU/SS=8
-					{activeKext, f3bbb, r3bbb, arrsize(f3bbb),	1},// NumSubSlices=12
+					{activeKext, f3bbb, r3bbb, arrsize(f3bbb),	1},// NumSubSlices (runtime)
 					{activeKext, f_devstart, m_devstart, r_devstart, rm_devstart, arrsize(f_devstart), 1}, // BCS bypass
 				};
 				PANIC_COND(!LookupPatchPlus::applyAll(patcher, patchesRPL, address, size), "ngreen",
@@ -1606,7 +1668,7 @@ bool Gen11::processKext(KernelPatcher &patcher, size_t index, mach_vm_address_t 
 
 		SYSLOG("ngreen", "Loaded AppleIntelTGLGraphics! %s",
 			   NGreen::callback->isRealTGL ? "Real TGL — native topology" :
-			   "RPL spoofed — slices=1 subslices=12(6DSS) maxEU/SS=8 totalEU=96 L3=8");
+			   "Gen12 spoofed — topology from resolveTopology()");
 
 		return true;
 	}
@@ -4947,22 +5009,23 @@ void Gen11::getGPUInfo(void *that)
 	
 	FunctionCast(getGPUInfo, callback->ogetGPUInfo)(that);
 
-	// --- GPU topology override for RPL i7-13700H (verified from Linux i915 syslog) ---
-	// Linux i915 reports: 1 slice, 6 DSS (mask=0x3f), 16 EU/DSS, 96 EU total.
-	// TGL binary uses traditional sub-slices (SS), not dual sub-slices (DSS):
-	//   6 DSS × 2 SS/DSS = 12 SS,  16 EU/DSS / 2 = 8 EU/SS, 12 × 8 = 96 EU.
+	// --- GPU topology override for spoofed Gen12 parts ---
+	// Values come from resolveTopology() (fuse / `ngreen-dss`); reference points:
+	//   i7-13700H: 6 DSS, 96 EU -> 12 SS x 8 EU    i3-1215U: 4 DSS, 64 EU -> 8 SS x 8 EU
+	// TGL binary uses traditional sub-slices (SS), not dual sub-slices (DSS): 1 DSS = 2 SS.
 	// Object layout (byte offsets from `this`, verified via disassembly):
 	//   0x115c = NumSlices          0x0dd8 = NumSlices mirror
 	//   0x1158 = NumSubSlices       0x0ddc = NumSubSlices mirror
 	//   0x116c = MaxEUPerSubSlice
-	//   0x1124 = ExecutionUnitCount (= MaxEUPerSubSlice × NumSubSlices)
+	//   0x1124 = ExecutionUnitCount (= MaxEUPerSubSlice x NumSubSlices)
 	//   0x1150 = Frequency pair (low32=fMaxMHz, high32=fMinMHz)
 	//   0x1164 = L3BankCount
-	unsigned int numSlices        = 1;
-	unsigned int numSubSlices     = 12;  // 6 DSS × 2 = 12 traditional SS
-	unsigned int maxEUPerSubSlice = 8;   // 16 EU/DSS ÷ 2 SS/DSS = 8 EU/SS
-	unsigned int totalEU          = maxEUPerSubSlice * numSubSlices; // = 96
-	
+	const NGreenTopology &topo = resolveTopology();
+	unsigned int numSlices        = topo.numSlices;
+	unsigned int numSubSlices     = topo.numSubSlices;
+	unsigned int maxEUPerSubSlice = topo.maxEUPerSubSlice;
+	unsigned int totalEU          = topo.totalEU;
+
 	getMember<UInt32>(that, 0x115c) = numSlices;
 	getMember<UInt32>(that, 0x1158) = numSubSlices;
 	getMember<UInt32>(that, 0x116c) = maxEUPerSubSlice;
