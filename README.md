@@ -43,7 +43,7 @@ Patches Apple's Tiger Lake (Gen12) graphics drivers to work with newer Intel iGP
 - Accelerator starts: V45 `getState()=0x1e` (reg=1 match=1 pub=1), Metal/GL/VA plugins loaded ✓
 - V507 re-repair now fires on every `populateResetRegisterList` return to cover the display retry loop
 
-**Remaining blocker:** Preamble ring (16 DWs, two PIPE_CONTROLs) executes (`HEAD=TAIL=0x40`), but stamp write (`value=2` to GPU address `0x40001200` = GGTT[0x40001]+0x200) may not land — GGTT[0x40001] PTE not yet verified. If unmapped, `fwWaitForHardwareRegisterValue` polls forever. Next step: add GGTT[0x40001] PTE + content dump to HANGCHECK.
+**Remaining blocker:** Preamble ring (16 DWs, two PIPE_CONTROLs) executes (`HEAD=TAIL=0x40`), but stamp write (`value=2` to GPU address `0x40001200` = GGTT[0x40001]+0x200) may not land — GGTT[0x40001] PTE not yet verified. If unmapped, `fwWaitForHardwareRegisterValue` polls forever. The HANGCHECK dump (V206) already prints GGTT[0x40000]/GGTT[0x40001] PTEs and the stamp DW[0x80]; next step: read those lines from a boot log (`present=0` means the stamp write is dropped).
 
 ### Recent Progress
 
